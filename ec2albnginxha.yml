@@ -1,33 +1,41 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Demo - ALB + AutoScaling + NGINX Hello World
+Description: Demo stack - ALB + AutoScaling + NGINX Hello World using latest Amazon Linux via SSM
 
 Parameters:
-  KeyName:
-    Type: AWS::EC2::KeyPair::KeyName
-    Description: SSH key for EC2 access
-
   InstanceType:
     Type: String
     Default: t3.micro
+    Description: EC2 instance type
 
-Mappings:
-  RegionMap:
-    eu-west-2:
-      AMI: ami-0fc5d935ebf8bc3bc
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: SSH key for EC2 instances
+
+  DesiredCapacity:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 8
+    Description: Number of EC2 instances in the Auto Scaling Group
 
 Resources:
 
-# -------------------------
-# Networking
-# -------------------------
-
+# ----------------------------
+# VPC
+# ----------------------------
   DemoVPC:
     Type: AWS::EC2::VPC
     Properties:
       CidrBlock: 10.0.0.0/16
       EnableDnsSupport: true
       EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: DemoVPC
 
+# ----------------------------
+# Internet Gateway
+# ----------------------------
   InternetGateway:
     Type: AWS::EC2::InternetGateway
 
@@ -37,12 +45,15 @@ Resources:
       VpcId: !Ref DemoVPC
       InternetGatewayId: !Ref InternetGateway
 
+# ----------------------------
+# Public Subnets
+# ----------------------------
   PublicSubnetA:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref DemoVPC
       CidrBlock: 10.0.1.0/24
-      AvailabilityZone: !Select [0, !GetAZs '']
+      AvailabilityZone: !Select [0, !GetAZs ""]
       MapPublicIpOnLaunch: true
 
   PublicSubnetB:
@@ -50,10 +61,13 @@ Resources:
     Properties:
       VpcId: !Ref DemoVPC
       CidrBlock: 10.0.2.0/24
-      AvailabilityZone: !Select [1, !GetAZs '']
+      AvailabilityZone: !Select [1, !GetAZs ""]
       MapPublicIpOnLaunch: true
 
-  RouteTable:
+# ----------------------------
+# Routing
+# ----------------------------
+  PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref DemoVPC
@@ -62,34 +76,48 @@ Resources:
     Type: AWS::EC2::Route
     DependsOn: AttachGateway
     Properties:
-      RouteTableId: !Ref RouteTable
-      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicRouteTable
       DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
 
-# -------------------------
-# Security
-# -------------------------
+  SubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
 
+  SubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+# ----------------------------
+# Security Group
+# ----------------------------
   WebSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Web access
+      GroupDescription: Allow HTTP and SSH
       VpcId: !Ref DemoVPC
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
           CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
 
-# -------------------------
+# ----------------------------
 # Launch Template
-# -------------------------
-
+# ----------------------------
   LaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
     Properties:
       LaunchTemplateData:
-        ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMI]
+        ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}"
         InstanceType: !Ref InstanceType
         KeyName: !Ref KeyName
         SecurityGroupIds:
@@ -106,16 +134,19 @@ Resources:
 
             cat <<EOF > /usr/share/nginx/html/index.html
             <html>
-            <h1>Hello from Auto Scaling!</h1>
-            <p>Instance: $INSTANCE_ID</p>
+            <head><title>CloudFormation Demo</title></head>
+            <body style="font-family: Arial">
+            <h1>Hello from AWS CloudFormation!</h1>
+            <p>This page is served by NGINX.</p>
+            <p>Instance ID: $INSTANCE_ID</p>
+            </body>
             </html>
             EOF
 
-# -------------------------
+# ----------------------------
 # Load Balancer
-# -------------------------
-
-  LoadBalancer:
+# ----------------------------
+  ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Subnets:
@@ -124,6 +155,9 @@ Resources:
       SecurityGroups:
         - !Ref WebSecurityGroup
 
+# ----------------------------
+# Target Group
+# ----------------------------
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -131,27 +165,30 @@ Resources:
       Protocol: HTTP
       VpcId: !Ref DemoVPC
       HealthCheckPath: /
+      TargetType: instance
 
+# ----------------------------
+# Listener
+# ----------------------------
   Listener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
       Port: 80
       Protocol: HTTP
-      LoadBalancerArn: !Ref LoadBalancer
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup
 
-# -------------------------
-# Auto Scaling
-# -------------------------
-
+# ----------------------------
+# Auto Scaling Group
+# ----------------------------
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
-      MinSize: 2
-      MaxSize: 4
-      DesiredCapacity: 2
+      MinSize: !Ref DesiredCapacity
+      MaxSize: !Ref DesiredCapacity
+      DesiredCapacity: !Ref DesiredCapacity
       VPCZoneIdentifier:
         - !Ref PublicSubnetA
         - !Ref PublicSubnetB
@@ -161,7 +198,42 @@ Resources:
       TargetGroupARNs:
         - !Ref TargetGroup
 
+# ----------------------------
+# Outputs
+# ----------------------------
 Outputs:
   WebsiteURL:
-    Description: Access the demo here
-    Value: !Sub http://${LoadBalancer.DNSName}
+    Description: HTTP URL of the demo application
+    Value: !Sub http://${ApplicationLoadBalancer.DNSName}
+
+  LoadBalancerDNS:
+    Description: DNS name of the Application Load Balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+  LoadBalancerArn:
+    Description: ARN of the Application Load Balancer
+    Value: !Ref ApplicationLoadBalancer
+
+  VPCId:
+    Description: ID of the created VPC
+    Value: !Ref DemoVPC
+
+  PublicSubnetA:
+    Description: Public Subnet A ID
+    Value: !Ref PublicSubnetA
+
+  PublicSubnetB:
+    Description: Public Subnet B ID
+    Value: !Ref PublicSubnetB
+
+  AutoScalingGroupName:
+    Description: Name of the Auto Scaling Group
+    Value: !Ref AutoScalingGroup
+
+  LaunchTemplateId:
+    Description: Launch Template used for EC2 instances
+    Value: !Ref LaunchTemplate
+
+  SecurityGroupId:
+    Description: Security group applied to EC2 instances
+    Value: !Ref WebSecurityGroup

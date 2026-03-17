@@ -1,0 +1,68 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Fully plug-and-play demo for AWS Learner Labs.
+  Creates a Lambda + API Gateway. No IAM creation required.
+  Students can invoke the API immediately.
+
+Resources:
+  # Lambda Function
+  DemoLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: DemoLambda
+      Handler: index.handler
+      Runtime: python3.11
+      # Use the managed Lambda service role automatically assigned by the environment
+      Role: arn:aws:iam::593854003799:role/service-role/LabDefaultLambdaRole
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              return {
+                  'statusCode': 200,
+                  'body': 'Hello students! 🌥️ This is your cloud API.'
+              }
+
+  # API Gateway
+  DemoApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: DemoApi
+      Description: Demo API for Learner Labs
+
+  # /demo resource
+  DemoResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DemoApi
+      ParentId: !GetAtt DemoApi.RootResourceId
+      PathPart: demo
+
+  # GET Method
+  DemoGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DemoApi
+      ResourceId: !Ref DemoResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri:
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DemoLambda.Arn}/invocations
+
+  # Lambda Permission
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DemoLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn:
+        Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${DemoApi}/*/GET/demo
+
+Outputs:
+  ApiUrl:
+    Description: "Invoke URL for Demo API"
+    Value:
+      Fn::Sub: "https://${DemoApi}.execute-api.${AWS::Region}.amazonaws.com/prod/demo"
